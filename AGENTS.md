@@ -35,7 +35,9 @@ src/
 ## Conventions
 
 - New hooks: follow patterns in `src/hooks/`
-- All command matching uses AST parsing via `@aliou/sh`
+- Built-in dangerous command matching uses AST parsing via `@aliou/sh`; user-configured patterns use substring/regex matching
+- Config migrations are predicate-based (`shouldRun`) using structural checks; do not rely on lexicographic version string comparisons
+- `config.version` is a schema marker for debugging/inspection, not the package version
 - Events emitted on the pi event bus for inter-extension communication
 
 ## Versioning

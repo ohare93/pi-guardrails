@@ -15,7 +15,13 @@ import type {
 } from "../config";
 import { pendingWarnings } from "./warnings";
 
-export const CURRENT_VERSION = "0.6.0-20260204";
+/**
+ * Config schema version.
+ *
+ * Keep this independent from package.json version.
+ * Bump only when config schema/default migration markers change.
+ */
+export const CURRENT_VERSION = "0.7.0-20260204";
 
 /**
  * Check if a config needs migration (no version field = v0).

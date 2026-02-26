@@ -94,8 +94,6 @@ const REMOVED_FEATURE_KEYS = [
   "enforcePackageManager",
 ] as const;
 
-const TOOLCHAIN_MIGRATION_VERSION = "0.7.0-20260204";
-
 function hasRemovedFields(config: GuardrailsConfig): boolean {
   const raw = config as Record<string, unknown>;
   const features = raw.features as Record<string, unknown> | undefined;
@@ -116,7 +114,7 @@ function stripRemovedFields(config: GuardrailsConfig): GuardrailsConfig {
     }
   }
   delete cleaned.packageManager;
-  cleaned.version = TOOLCHAIN_MIGRATION_VERSION;
+  cleaned.version = CURRENT_VERSION;
   return cleaned as GuardrailsConfig;
 }
 
@@ -133,16 +131,11 @@ const migrations: Migration<GuardrailsConfig>[] = [
     name: "strip-toolchain-fields",
     shouldRun: (config) => hasRemovedFields(config),
     run: (config) => {
-      const version = (config as Record<string, unknown>).version as
-        | string
-        | undefined;
-      if (!version || version < TOOLCHAIN_MIGRATION_VERSION) {
-        pendingWarnings.push(
-          "[guardrails] preventBrew, preventPython, enforcePackageManager, and packageManager " +
-            "have been removed from guardrails and moved to @aliou/pi-toolchain. " +
-            "These fields will be stripped from your config.",
-        );
-      }
+      pendingWarnings.push(
+        "[guardrails] preventBrew, preventPython, enforcePackageManager, and packageManager " +
+          "have been removed from guardrails and moved to @aliou/pi-toolchain. " +
+          "These fields will be stripped from your config.",
+      );
       return stripRemovedFields(config);
     },
   },

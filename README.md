@@ -4,7 +4,7 @@ Security hooks to prevent potentially dangerous operations.
 
 ## Demo
 
-<video src="https://assets.aliou.me/pi-extensions/2026-01-26-guardrails-demo.mp4" controls playsinline muted></video>
+<video src="https://assets.aliou.me/pi-extensions/demos/pi-guardrails.mp4" controls playsinline muted></video>
 
 ## Installation
 
@@ -23,7 +23,7 @@ pi install git:github.com/aliou/pi-guardrails
 - **protect-env-files**: Prevents access to `.env` files (except `.example`/`.sample`/`.test`)
 - **permission-gate**: Prompts for confirmation on dangerous commands
 
-All hooks use structural shell parsing via `@aliou/sh` to avoid false positives from keywords inside commit messages, grep patterns, heredocs, or file paths. On parse failure, each hook falls back to regex matching (previous behavior).
+Hooks use structural shell parsing via `@aliou/sh` where possible to avoid false positives from keywords inside commit messages, grep patterns, heredocs, or file paths. On parse failure, `permission-gate` falls back to substring matching of configured patterns, and `protect-env-files` falls back to regex extraction of env-like paths before normal file-pattern matching.
 
 > **Migration note**: The `preventBrew`, `preventPython`, `enforcePackageManager`, and `packageManager` fields have been removed from guardrails and moved to the [`@aliou/pi-toolchain`](https://github.com/aliou/pi-toolchain) extension. Old configs containing these fields are auto-cleaned on first load with a one-time warning. Install `@aliou/pi-toolchain` and configure `.pi/extensions/toolchain.json` instead.
 
@@ -48,6 +48,8 @@ Configs without a `version` field are automatically migrated on first load. The 
 - Backs up the original as `guardrails.v0.json`
 - Converts all string patterns to `{ pattern, regex: true }` to preserve behavior
 - Adds a `version` field
+
+`version` is a config schema marker (not the npm package version). After any migration rewrites the config, guardrails writes the current schema version.
 
 ### Configuration Schema
 
@@ -123,7 +125,7 @@ Built-in dangerous command patterns (`rm -rf`, `sudo`, `dd if=`, `mkfs.*`, `chmo
 |---|---|---|
 | `protectedPatterns` | `[".env", ".env.local", ...]` | Patterns for files to protect (glob by default) |
 | `allowedPatterns` | `[".env.example", "*.example.env", ...]` | Patterns for allowed exceptions |
-| `protectedDirectories` | `[]` | Patterns for directories to protect |
+| `protectedDirectories` | `[]` | Optional extra directory filter applied after `protectedPatterns` match |
 | `protectedTools` | `["read", "write", "edit", "bash", "grep", "find", "ls"]` | Tools to intercept |
 | `onlyBlockIfExists` | `true` | Only block if the file exists on disk |
 | `blockMessage` | See defaults | Message shown when blocked. Supports `{file}` placeholder |
@@ -133,7 +135,7 @@ Built-in dangerous command patterns (`rm -rf`, `sudo`, `dd if=`, `mkfs.*`, `chmo
 | Key | Default | Description |
 |---|---|---|
 | `patterns` | See defaults | Array of `{ pattern, description }` for dangerous commands |
-| `customPatterns` | Not set | If set, replaces `patterns` entirely |
+| `customPatterns` | Not set | If set, replaces `patterns` entirely and disables built-in structural matchers |
 | `requireConfirmation` | `true` | Show confirmation dialog (if `false`, just warns) |
 | `allowedPatterns` | `[]` | Patterns that bypass the gate |
 | `autoDenyPatterns` | `[]` | Patterns that are blocked immediately without dialog |
@@ -218,7 +220,7 @@ The [presenter extension](https://github.com/aliou/pi-extensions/tree/main/exten
 
 Prevents accessing `.env` files that might contain secrets. Only allows access to safe variants like `.env.example`, `.env.sample`, `.env.test`.
 
-Shell globs (e.g. `.env*`) are expanded via `fd` to check if any expanded path matches a protected pattern.
+Shell globs (e.g. `.env*`) are expanded via `fd` on a best-effort basis to check if any expanded path matches a protected pattern. If expansion fails (e.g. `fd` unavailable), matching still runs against the original token.
 
 Covers tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls` (configurable).
 
