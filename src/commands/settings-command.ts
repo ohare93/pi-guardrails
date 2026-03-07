@@ -91,6 +91,160 @@ const POLICY_EXAMPLES: Array<{
       enabled: true,
     },
   },
+  {
+    label: "SSH keys",
+    description: "Block access to SSH private keys",
+    rule: {
+      id: "example-ssh-keys",
+      name: "SSH keys",
+      description: "Block SSH private key files",
+      patterns: [
+        { pattern: "*.pem" },
+        { pattern: "*_rsa" },
+        { pattern: "*_ed25519" },
+      ],
+      allowedPatterns: [{ pattern: "*.pub" }],
+      protection: "noAccess",
+      onlyIfExists: true,
+      enabled: true,
+    },
+  },
+  {
+    label: "AWS credentials",
+    description: "Block AWS CLI credentials file",
+    rule: {
+      id: "example-aws-credentials",
+      name: "AWS credentials",
+      description: "Block AWS credentials and config files",
+      patterns: [{ pattern: ".aws/credentials" }, { pattern: ".aws/config" }],
+      protection: "noAccess",
+      onlyIfExists: true,
+      enabled: true,
+    },
+  },
+  {
+    label: "Database files",
+    description: "Mark SQLite/DB files read-only",
+    rule: {
+      id: "example-database-files",
+      name: "Database files",
+      description: "Protect database files from modification",
+      patterns: [
+        { pattern: "*.db" },
+        { pattern: "*.sqlite" },
+        { pattern: "*.sqlite3" },
+      ],
+      protection: "readOnly",
+      onlyIfExists: true,
+      enabled: true,
+    },
+  },
+  {
+    label: "Kubernetes secrets",
+    description: "Block kubeconfig and k8s secrets",
+    rule: {
+      id: "example-k8s-secrets",
+      name: "Kubernetes secrets",
+      description: "Block kubectl config and secrets",
+      patterns: [{ pattern: ".kube/config" }, { pattern: "*kubeconfig*" }],
+      protection: "noAccess",
+      onlyIfExists: true,
+      enabled: true,
+    },
+  },
+  {
+    label: "Certificates",
+    description: "Block SSL/TLS certificate files",
+    rule: {
+      id: "example-certificates",
+      name: "Certificates",
+      description: "Block certificate and key files",
+      patterns: [
+        { pattern: "*.crt" },
+        { pattern: "*.key" },
+        { pattern: "*.p12" },
+      ],
+      allowedPatterns: [{ pattern: "*.csr" }],
+      protection: "noAccess",
+      onlyIfExists: true,
+      enabled: true,
+    },
+  },
+];
+
+const COMMAND_EXAMPLES: Array<{
+  label: string;
+  description: string;
+  pattern: DangerousPattern;
+}> = [
+  {
+    label: "Terraform apply",
+    description: "Require confirmation for infrastructure changes",
+    pattern: {
+      pattern: "terraform apply",
+      description: "Terraform infrastructure changes",
+    },
+  },
+  {
+    label: "Terraform destroy",
+    description: "Require confirmation for infrastructure destruction",
+    pattern: {
+      pattern: "terraform destroy",
+      description: "Terraform infrastructure destruction",
+    },
+  },
+  {
+    label: "kubectl delete",
+    description: "Require confirmation for k8s resource deletion",
+    pattern: {
+      pattern: "kubectl delete",
+      description: "Kubernetes resource deletion",
+    },
+  },
+  {
+    label: "docker system prune",
+    description: "Require confirmation for Docker cleanup",
+    pattern: {
+      pattern: "docker system prune",
+      description: "Docker system cleanup",
+    },
+  },
+  {
+    label: "git push --force",
+    description: "Require confirmation for force push",
+    pattern: { pattern: "git push --force", description: "Git force push" },
+  },
+  {
+    label: "npm publish",
+    description: "Require confirmation for package publishing",
+    pattern: { pattern: "npm publish", description: "NPM package publishing" },
+  },
+  {
+    label: "yarn publish",
+    description: "Require confirmation for package publishing",
+    pattern: {
+      pattern: "yarn publish",
+      description: "Yarn package publishing",
+    },
+  },
+  {
+    label: "pnpm publish",
+    description: "Require confirmation for package publishing",
+    pattern: {
+      pattern: "pnpm publish",
+      description: "PNPM package publishing",
+    },
+  },
+  {
+    label: "drop database",
+    description: "Require confirmation for database drops",
+    pattern: { pattern: "DROP DATABASE", description: "SQL database drop" },
+  },
+  {
+    label: "drop table",
+    description: "Require confirmation for table drops",
+    pattern: { pattern: "DROP TABLE", description: "SQL table drop" },
+  },
 ];
 
 function toKebabCase(input: string): string {
@@ -124,6 +278,26 @@ function appendPolicyRule(
   next.policies = {
     ...(next.policies ?? {}),
     rules: [...currentRules, rule],
+  };
+
+  return next;
+}
+
+function appendDangerousPattern(
+  config: GuardrailsConfig | null,
+  pattern: DangerousPattern,
+): GuardrailsConfig {
+  const next = structuredClone(config ?? {}) as GuardrailsConfig;
+  const currentPatterns = next.permissionGate?.patterns ?? [];
+
+  const existingPatterns = new Set(currentPatterns.map((p) => p.pattern));
+  if (existingPatterns.has(pattern.pattern)) {
+    return next;
+  }
+
+  next.permissionGate = {
+    ...(next.permissionGate ?? {}),
+    patterns: [...currentPatterns, structuredClone(pattern)],
   };
 
   return next;
@@ -1042,7 +1216,7 @@ export function registerGuardrailsSettings(pi: ExtensionAPI): void {
           setDraftForScope,
           theme,
         }): SettingsSection[] => {
-          const items: SettingItem[] = POLICY_EXAMPLES.map((example) => ({
+          const policyItems: SettingItem[] = POLICY_EXAMPLES.map((example) => ({
             id: `examples.${example.rule.id}`,
             label: `  ${example.label}`,
             description: example.description,
@@ -1063,10 +1237,40 @@ export function registerGuardrailsSettings(pi: ExtensionAPI): void {
               ),
           }));
 
+          const commandItems: SettingItem[] = COMMAND_EXAMPLES.map(
+            (example) => ({
+              id: `examples.cmd.${example.pattern.pattern}`,
+              label: `  ${example.label}`,
+              description: example.description,
+              currentValue: "add",
+              submenu: (_val: string, submenuDone: (v?: string) => void) =>
+                new ScopePickerSubmenu(
+                  theme,
+                  enabledScopes,
+                  (targetScope) => {
+                    const baseConfig =
+                      getDraftForScope(targetScope) ??
+                      getRawForScope(targetScope) ??
+                      null;
+                    const updated = appendDangerousPattern(
+                      baseConfig,
+                      example.pattern,
+                    );
+                    setDraftForScope(targetScope, updated);
+                  },
+                  submenuDone,
+                ),
+            }),
+          );
+
           return [
             {
-              label: "Policy presets",
-              items,
+              label: "File policy presets",
+              items: policyItems,
+            },
+            {
+              label: "Dangerous command presets",
+              items: commandItems,
             },
           ];
         },
