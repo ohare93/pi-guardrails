@@ -1,5 +1,21 @@
 # @aliou/pi-guardrails
 
+## 0.10.0
+
+### Minor Changes
+
+- 6356335: Add command-based onboarding for new users.
+
+  - add `/guardrails:onboarding` command and session-start hint when setup is pending
+  - replace auto-open onboarding with explicit overlay flow
+  - add onboarding completion marker for config compatibility and first-run state
+  - improve onboarding wizard copy and defaults/recap UX
+
+### Patch Changes
+
+- 828c019: Fix dangerous command confirmation UI scrolling for long multi-line commands.
+- 97597c2: Fix home-directory default policy rules so `~`-based patterns match correctly and expand to the current user's home directory during blocking and existence checks.
+
 ## 0.9.5
 
 ### Patch Changes
