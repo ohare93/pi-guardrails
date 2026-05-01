@@ -60,6 +60,51 @@ export interface PathAccessConfig {
   allowedPaths?: string[];
 }
 
+export type ApprovalBrokerPreset =
+  | "first-terminal"
+  | "all"
+  | "threshold"
+  | "any-approve"
+  | "veto-threshold";
+
+export type ApprovalBrokerStrategyConfig = {
+  preset?: ApprovalBrokerPreset;
+  approvalsRequired?: number | "all";
+  denyPolicy?: "first-deny-veto" | "all-deny" | "ignore-denies";
+  cancelLosers?: boolean;
+  brokerTimeoutMs?: number | "none";
+  operatorAbort?: boolean;
+  requiredSources?: string[];
+  acknowledgeUnsafeIgnoreDenies?: true;
+};
+
+export type ApprovalBrokerSourceConfig = {
+  type?: "local-ui" | "agent-tick-cli" | string;
+  enabled?: boolean;
+  local?: boolean;
+  bin?: string;
+  timeout?: number | "none";
+  expiresIn?: number | "none";
+  requireAbandonForNoExpiry?: boolean;
+  abandon?: boolean;
+  extraArgs?: string[];
+};
+
+export type ApprovalBrokerRouteConfig = {
+  sources?: string[];
+  strategy?: ApprovalBrokerStrategyConfig;
+  remoteGrantScopes?: Array<
+    "once" | "file-session" | "dir-session" | "file-always" | "dir-always"
+  >;
+};
+
+export interface ApprovalBrokerConfig {
+  enabled?: boolean;
+  defaultStrategy?: ApprovalBrokerStrategyConfig;
+  sources?: Record<string, ApprovalBrokerSourceConfig>;
+  routes?: Record<string, ApprovalBrokerRouteConfig>;
+}
+
 export interface GuardrailsConfig {
   version?: string;
   enabled?: boolean;
@@ -81,6 +126,7 @@ export interface GuardrailsConfig {
     rules?: PolicyRule[];
   };
   pathAccess?: PathAccessConfig;
+  approvalBroker?: ApprovalBrokerConfig;
   // Deprecated. Kept only for migration.
   envFiles?: {
     protectedPatterns?: PatternConfig[];
@@ -118,6 +164,21 @@ export interface ResolvedConfig {
   pathAccess: {
     mode: PathAccessMode;
     allowedPaths: string[];
+  };
+  approvalBroker: {
+    enabled: boolean;
+    defaultStrategy: Required<
+      Omit<
+        ApprovalBrokerStrategyConfig,
+        "requiredSources" | "acknowledgeUnsafeIgnoreDenies"
+      >
+    > &
+      Pick<
+        ApprovalBrokerStrategyConfig,
+        "requiredSources" | "acknowledgeUnsafeIgnoreDenies"
+      >;
+    sources: Record<string, ApprovalBrokerSourceConfig & { enabled: boolean }>;
+    routes: Record<string, ApprovalBrokerRouteConfig>;
   };
   permissionGate: {
     patterns: DangerousPattern[];
@@ -226,6 +287,44 @@ const DEFAULT_CONFIG: ResolvedConfig = {
   pathAccess: {
     mode: "ask",
     allowedPaths: [],
+  },
+  approvalBroker: {
+    enabled: true,
+    defaultStrategy: {
+      preset: "first-terminal",
+      approvalsRequired: 1,
+      denyPolicy: "first-deny-veto",
+      cancelLosers: true,
+      brokerTimeoutMs: "none",
+      operatorAbort: true,
+    },
+    sources: {
+      local: {
+        type: "local-ui",
+        enabled: true,
+        local: true,
+      },
+      "agent-tick": {
+        type: "agent-tick-cli",
+        enabled: false,
+        local: false,
+        bin: "agent-tick",
+        timeout: "none",
+        expiresIn: "none",
+        requireAbandonForNoExpiry: true,
+      },
+    },
+    routes: {
+      permissionGate: {
+        sources: ["local"],
+        strategy: { preset: "first-terminal", cancelLosers: true },
+      },
+      pathAccess: {
+        sources: ["local"],
+        strategy: { preset: "first-terminal", cancelLosers: true },
+        remoteGrantScopes: ["once"],
+      },
+    },
   },
   policies: {
     rules: [

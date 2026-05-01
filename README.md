@@ -30,6 +30,7 @@ pi install git:github.com/aliou/pi-guardrails
 - **policies**: named file-protection rules with per-rule protection levels.
 - **permission-gate**: detects dangerous bash commands and asks for confirmation.
 - **path-access**: restricts tool access to the current working directory with allow/ask/block modes.
+- **approval broker**: routes approval requests through local Pi UI and optional remote sources such as Agent Tick.
 - **optional command explainer**: can call a small LLM to explain a dangerous command inline in the confirmation dialog.
 
 ## Config locations
@@ -57,6 +58,37 @@ Use `/guardrails:settings` to edit config interactively.
   "pathAccess": {
     "mode": "ask",
     "allowedPaths": []
+  },
+  "approvalBroker": {
+    "enabled": true,
+    "defaultStrategy": {
+      "preset": "first-terminal",
+      "approvalsRequired": 1,
+      "denyPolicy": "first-deny-veto",
+      "cancelLosers": true,
+      "brokerTimeoutMs": "none",
+      "operatorAbort": true
+    },
+    "sources": {
+      "local": { "type": "local-ui", "enabled": true, "local": true },
+      "agent-tick": {
+        "type": "agent-tick-cli",
+        "enabled": false,
+        "local": false,
+        "bin": "agent-tick",
+        "timeout": "none",
+        "expiresIn": "none",
+        "requireAbandonForNoExpiry": true
+      }
+    },
+    "routes": {
+      "permissionGate": { "sources": ["local"], "strategy": { "preset": "first-terminal" } },
+      "pathAccess": {
+        "sources": ["local"],
+        "strategy": { "preset": "first-terminal" },
+        "remoteGrantScopes": ["once"]
+      }
+    }
   },
   "policies": {
     "rules": [
@@ -152,7 +184,7 @@ Grants are stored in project config (always) or session memory (session). The `a
 Limitations:
 - Symlinks are not resolved (lexical path comparison only).
 - Bash path extraction is best-effort (AST-based heuristics).
-- In non-interactive mode, `ask` mode degrades to `block`.
+- In non-interactive mode, `ask` mode degrades to `block` unless you configure an enabled remote approval source for the path-access route.
 
 ## Permission gate
 
@@ -168,6 +200,26 @@ Built-in dangerous patterns are matched structurally (AST-based) for better accu
 - `chown -R`
 
 You can also add custom dangerous patterns.
+
+## Approval broker and Agent Tick
+
+Guardrails routes permission-gate and path-access prompts through an approval broker. By default this preserves the existing local Pi UI. To enable Agent Tick as an additional request-side source, enable the `agent-tick` source and add it to the route source list:
+
+```jsonc
+{
+  "approvalBroker": {
+    "sources": {
+      "agent-tick": { "type": "agent-tick-cli", "enabled": true }
+    },
+    "routes": {
+      "permissionGate": { "sources": ["local", "agent-tick"] },
+      "pathAccess": { "sources": ["local", "agent-tick"], "remoteGrantScopes": ["once"] }
+    }
+  }
+}
+```
+
+Agent Tick approvals are created/waited/abandoned by Guardrails; Guardrails never answers an Agent Tick request. Remote path-access approvals grant only the current tool call unless scoped remote grants are explicitly enabled.
 
 ### Explain commands (opt-in)
 

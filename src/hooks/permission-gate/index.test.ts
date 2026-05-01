@@ -50,6 +50,29 @@ function makeConfig(
     features: { policies: false, permissionGate: true, pathAccess: false },
     policies: { rules: [] },
     pathAccess: { mode: "ask", allowedPaths: [] },
+    approvalBroker: {
+      enabled: true,
+      defaultStrategy: {
+        preset: "first-terminal",
+        approvalsRequired: 1,
+        denyPolicy: "first-deny-veto",
+        cancelLosers: true,
+        brokerTimeoutMs: "none",
+        operatorAbort: true,
+      },
+      sources: { local: { type: "local-ui", enabled: true, local: true } },
+      routes: {
+        permissionGate: {
+          sources: ["local"],
+          strategy: { preset: "first-terminal" },
+        },
+        pathAccess: {
+          sources: ["local"],
+          strategy: { preset: "first-terminal" },
+          remoteGrantScopes: ["once"],
+        },
+      },
+    },
     permissionGate: {
       patterns: [],
       useBuiltinMatchers: true,

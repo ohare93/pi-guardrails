@@ -18,6 +18,12 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
+import {
+  ApprovalBroker,
+  buildApprovalRouteSources,
+  createLocalApprovalSource,
+  routeHasEnabledRemoteSource,
+} from "../../approval";
 import type { DangerousPattern, ResolvedConfig } from "../../config";
 import { configLoader } from "../../config";
 import { executeSubagent, resolveModel } from "../../lib";
@@ -291,6 +297,14 @@ function createPermissionGateConfirmComponent(
   };
 }
 
+function getSessionId(ctx: ExtensionContext): string | undefined {
+  try {
+    return ctx.sessionManager?.getSessionId();
+  } catch {
+    return undefined;
+  }
+}
+
 async function explainCommand(
   command: string,
   modelSpec: string,
@@ -498,8 +512,12 @@ export function setupPermissionGateHook(
     emitDangerous(pi, { command, description, pattern: rawPattern });
 
     if (config.permissionGate.requireConfirmation) {
-      // In print/RPC mode, block by default (safe fallback)
-      if (!ctx.hasUI) {
+      // In print/RPC mode, block by default unless a remote approval source
+      // is configured for this route.
+      if (
+        !ctx.hasUI &&
+        !routeHasEnabledRemoteSource(config, "permissionGate")
+      ) {
         const reason = `Dangerous command blocked (no UI to confirm): ${description}`;
         emitBlocked(pi, {
           feature: "permissionGate",
@@ -539,25 +557,81 @@ export function setupPermissionGateHook(
         SELECT_DENY,
       ] as const;
 
-      let result = await ctx.ui.custom<ConfirmResult>(
-        createPermissionGateConfirmComponent(command, description, explanation),
+      const localSource = createLocalApprovalSource<ConfirmResult>({
+        createCustomPrompt: () =>
+          createPermissionGateConfirmComponent(
+            command,
+            description,
+            explanation,
+          ),
+        fallbackSelect: {
+          title: () => `Dangerous command: ${description}`,
+          options: SELECT_OPTIONS,
+          mapSelection: (selection) => {
+            if (selection === SELECT_ALLOW_ONCE) return "allow";
+            if (selection === SELECT_ALLOW_SESSION) return "allow-session";
+            return "deny";
+          },
+        },
+        mapResult: (result) => {
+          if (result === "allow") return { decision: "approve" };
+          if (result === "allow-session") {
+            return {
+              decision: "approve",
+              metadata: { permissionGateGrant: "session" },
+            };
+          }
+          return {
+            decision: "deny",
+            message: "User denied dangerous command",
+          };
+        },
+      });
+
+      const route = config.approvalBroker.enabled
+        ? buildApprovalRouteSources(config, "permissionGate", localSource)
+        : {
+            sources: [localSource],
+            sourceConfigs: {},
+            strategy: { preset: "first-terminal" as const },
+          };
+      const broker = new ApprovalBroker();
+      const brokerResult = await broker.requestApproval(
+        {
+          sessionId: getSessionId(ctx),
+          toolCallId: event.toolCallId,
+          title: "Dangerous Command Detected",
+          body: `This command contains ${description}:\n\n${command}`,
+          risk: "high",
+          action: {
+            kind: "tool_call",
+            toolName: "bash",
+            command,
+            inputPreview: command.slice(0, 2000),
+          },
+          metadata: {
+            feature: "permissionGate",
+            dangerousDescription: description,
+            dangerousPattern: rawPattern,
+          },
+        },
+        {
+          sources: route.sources,
+          sourceConfigs: route.sourceConfigs,
+          strategy: route.strategy,
+          defaultStrategy: config.approvalBroker.defaultStrategy,
+          cwd: ctx.cwd,
+          hasUI: ctx.hasUI,
+          piContext: ctx,
+          signal: (ctx as { signal?: AbortSignal }).signal,
+        },
       );
 
-      // Fallback: ctx.ui.custom() returns undefined in RPC/headless mode
-      // (Pi's RPC runtime stubs it as `async custom() { return undefined; }`).
-      // Fall back to ctx.ui.select() which works over the RPC protocol.
-      // If select() also returns undefined/malformed, deny by default.
-      if (result === undefined) {
-        const selection = await ctx.ui.select(
-          `Dangerous command: ${description}`,
-          [...SELECT_OPTIONS],
-        );
-        if (selection === SELECT_ALLOW_ONCE) result = "allow";
-        else if (selection === SELECT_ALLOW_SESSION) result = "allow-session";
-        else result = "deny";
-      }
-
-      if (result === "allow-session") {
+      if (
+        brokerResult.approved &&
+        brokerResult.winningDecision?.metadata?.permissionGateGrant ===
+          "session"
+      ) {
         // Save command as allowed in memory scope (session-only).
         // Spread the resolved allowed patterns and append the new one.
         const resolved = configLoader.getConfig();
@@ -574,16 +648,18 @@ export function setupPermissionGateHook(
         allowedPatterns.push(...compileCommandPatterns([{ pattern: command }]));
       }
 
-      if (result === "deny") {
+      if (!brokerResult.approved) {
         emitBlocked(pi, {
           feature: "permissionGate",
           toolName: "bash",
           input: event.input,
-          reason: "User denied dangerous command",
-          userDenied: true,
+          reason: brokerResult.reason,
+          userDenied:
+            brokerResult.winningDecision?.decision === "deny" ||
+            brokerResult.reason === "User denied dangerous command",
         });
 
-        return { block: true, reason: "User denied dangerous command" };
+        return { block: true, reason: brokerResult.reason };
       }
     } else {
       // No confirmation required - just notify and allow

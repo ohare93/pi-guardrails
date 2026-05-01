@@ -1,6 +1,9 @@
 import { homedir } from "node:os";
 import { dirname } from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
 import {
   Container,
   Key,
@@ -9,7 +12,15 @@ import {
   Text,
   visibleWidth,
 } from "@mariozechner/pi-tui";
-import { configLoader } from "../config";
+import type { ApprovalGrantScope } from "../approval";
+import {
+  ApprovalBroker,
+  buildApprovalRouteSources,
+  createLocalApprovalSource,
+  isRemoteApprovalSource,
+  routeHasEnabledRemoteSource,
+} from "../approval";
+import { configLoader, type ResolvedConfig } from "../config";
 import { extractBashPathCandidates } from "../utils/bash-paths";
 import { emitBlocked } from "../utils/events";
 import { normalizeAllowedPaths } from "../utils/migration";
@@ -35,6 +46,43 @@ interface PendingGrant {
   storagePath: string; // in storage form (~/..., trailing / for dirs)
   scope: "memory" | "local";
   absolutePath: string; // for in-loop matching
+}
+
+const VALID_GRANT_SCOPES = new Set<ApprovalGrantScope>([
+  "once",
+  "file-session",
+  "dir-session",
+  "file-always",
+  "dir-always",
+]);
+
+function promptResultToGrantScope(
+  result: PromptResult | undefined,
+): ApprovalGrantScope | undefined {
+  switch (result) {
+    case "allow-file-once":
+    case "allow-dir-once":
+      return "once";
+    case "allow-file-session":
+      return "file-session";
+    case "allow-dir-session":
+      return "dir-session";
+    case "allow-file-always":
+      return "file-always";
+    case "allow-dir-always":
+      return "dir-always";
+    case "deny":
+    case undefined:
+      return undefined;
+  }
+}
+
+function getSessionId(ctx: ExtensionContext): string | undefined {
+  try {
+    return ctx.sessionManager?.getSessionId();
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -257,6 +305,83 @@ async function persistGrant(
   });
 }
 
+function promptOptions(showFileOptions: boolean): readonly PromptOption[] {
+  return showFileOptions ? FILE_OPTIONS : DIR_OPTIONS;
+}
+
+function selectionToPromptResult(
+  selection: string | undefined,
+  showFileOptions: boolean,
+): PromptResult {
+  const option = promptOptions(showFileOptions).find(
+    (candidate) => candidate.label === selection,
+  );
+  return option?.result ?? "deny";
+}
+
+function resolveBrokerGrantScope(
+  config: ResolvedConfig,
+  sourceId: string | undefined,
+  scope: ApprovalGrantScope | undefined,
+): { ok: true; scope: ApprovalGrantScope } | { ok: false; reason: string } {
+  const grantScope = scope ?? "once";
+  if (!VALID_GRANT_SCOPES.has(grantScope)) {
+    return {
+      ok: false,
+      reason: `Approval source returned unsupported grant scope: ${String(scope)}`,
+    };
+  }
+
+  if (sourceId && isRemoteApprovalSource(sourceId, config)) {
+    const route = config.approvalBroker.routes.pathAccess;
+    const allowedRemoteScopes = route?.remoteGrantScopes ?? ["once"];
+    if (!allowedRemoteScopes.includes(grantScope)) {
+      return {
+        ok: false,
+        reason: `Remote approval source ${sourceId} returned disallowed grant scope: ${grantScope}`,
+      };
+    }
+  }
+
+  return { ok: true, scope: grantScope };
+}
+
+function pendingGrantForScope(
+  grantScope: ApprovalGrantScope,
+  absPath: string,
+  parentDir: string,
+  isDirectoryTool: boolean,
+  ctx: ExtensionContext,
+): PendingGrant | undefined {
+  if (grantScope === "once") return undefined;
+
+  if (grantScope === "file-session" || grantScope === "file-always") {
+    const scope = grantScope === "file-session" ? "memory" : "local";
+    return {
+      storagePath: toStorageForm(absPath, false),
+      scope,
+      absolutePath: absPath,
+    };
+  }
+
+  const scope = grantScope === "dir-session" ? "memory" : "local";
+  const dirPath = isDirectoryTool ? absPath : parentDir;
+
+  if (isGrantTooBroad(dirPath)) {
+    ctx.ui.notify(
+      `Cannot grant access to ${normalizeForDisplay(dirPath, ctx.cwd)}/ — too broad. Treating as allow once.`,
+      "warning",
+    );
+    return undefined;
+  }
+
+  return {
+    storagePath: toStorageForm(dirPath, true),
+    scope,
+    absolutePath: dirPath,
+  };
+}
+
 export function setupPathAccessHook(pi: ExtensionAPI): void {
   pi.on("tool_call", async (event, ctx) => {
     // Read config live on every invocation
@@ -302,7 +427,7 @@ export function setupPathAccessHook(pi: ExtensionAPI): void {
         cwd: ctx.cwd,
         mode: config.pathAccess.mode,
         allowedPaths: [...resolvedAllowed, ...pendingAllowedPaths],
-        hasUI: ctx.hasUI,
+        hasUI: ctx.hasUI || routeHasEnabledRemoteSource(config, "pathAccess"),
       };
 
       const displayPath = normalizeForDisplay(absPath, ctx.cwd);
@@ -325,64 +450,108 @@ export function setupPathAccessHook(pi: ExtensionAPI): void {
       const displayDir = normalizeForDisplay(parentDir, ctx.cwd);
       const showFileOptions = !isDirectoryTool;
 
-      const result = await ctx.ui.custom<PromptResult>(
-        createPromptComponent(
-          toolName,
-          displayPath,
-          displayDir,
-          ctx.cwd,
-          showFileOptions,
-        ),
+      const localSource = createLocalApprovalSource<PromptResult>({
+        createCustomPrompt: () =>
+          createPromptComponent(
+            toolName,
+            displayPath,
+            displayDir,
+            ctx.cwd,
+            showFileOptions,
+          ),
+        fallbackSelect: {
+          title: () => `Outside workspace access: ${displayPath}`,
+          options: promptOptions(showFileOptions).map((option) => option.label),
+          mapSelection: (selection) =>
+            selectionToPromptResult(selection, showFileOptions),
+        },
+        mapResult: (result) => {
+          const grantScope = promptResultToGrantScope(result);
+          if (!grantScope) {
+            return {
+              decision: "deny",
+              message: "User denied access outside working directory",
+            };
+          }
+          return { decision: "approve", grantScope };
+        },
+      });
+      const route = config.approvalBroker.enabled
+        ? buildApprovalRouteSources(config, "pathAccess", localSource)
+        : {
+            sources: [localSource],
+            sourceConfigs: {},
+            strategy: { preset: "first-terminal" as const },
+          };
+      const broker = new ApprovalBroker();
+      const brokerResult = await broker.requestApproval(
+        {
+          sessionId: getSessionId(ctx),
+          toolCallId: event.toolCallId,
+          title: "Outside Workspace Access",
+          body: `\`${toolName}\` targets a path outside the working directory.\n\nCwd: ${displayCwd(ctx.cwd)}\nPath: ${displayPath}\nDir: ${displayDir}`,
+          risk: "medium",
+          action: {
+            kind: "path_access",
+            toolName,
+            path: absPath,
+            inputPreview: JSON.stringify(event.input).slice(0, 2000),
+          },
+          metadata: {
+            feature: "pathAccess",
+            displayPath,
+            displayDir,
+          },
+        },
+        {
+          sources: route.sources,
+          sourceConfigs: route.sourceConfigs,
+          strategy: route.strategy,
+          defaultStrategy: config.approvalBroker.defaultStrategy,
+          cwd: ctx.cwd,
+          hasUI: ctx.hasUI,
+          piContext: ctx,
+          signal: (ctx as { signal?: AbortSignal }).signal,
+        },
       );
 
-      // Handle "once" grants: just continue, do NOT add to pending
-      if (result === "allow-file-once" || result === "allow-dir-once") {
-        continue;
-      }
-
-      // Handle session/always grants
-      if (result === "allow-file-session" || result === "allow-file-always") {
-        const scope = result === "allow-file-session" ? "memory" : "local";
-        const storage = toStorageForm(absPath, false);
-        pendingGrants.push({
-          storagePath: storage,
-          scope,
-          absolutePath: absPath,
+      if (!brokerResult.approved) {
+        const reason = brokerResult.reason;
+        emitBlocked(pi, {
+          feature: "pathAccess",
+          toolName,
+          input: event.input,
+          reason,
+          userDenied:
+            brokerResult.winningDecision?.decision === "deny" ||
+            reason === "User denied access outside working directory",
         });
-        continue;
+        return { block: true, reason };
       }
 
-      if (result === "allow-dir-session" || result === "allow-dir-always") {
-        const scope = result === "allow-dir-session" ? "memory" : "local";
-        const dirPath = isDirectoryTool ? absPath : parentDir;
-
-        if (isGrantTooBroad(dirPath)) {
-          ctx.ui.notify(
-            `Cannot grant access to ${normalizeForDisplay(dirPath, ctx.cwd)}/ — too broad. Treating as allow once.`,
-            "warning",
-          );
-          continue;
-        }
-
-        const storage = toStorageForm(dirPath, true);
-        pendingGrants.push({
-          storagePath: storage,
-          scope,
-          absolutePath: dirPath,
+      const resolvedScope = resolveBrokerGrantScope(
+        config,
+        brokerResult.winningDecision?.sourceId,
+        brokerResult.winningDecision?.grantScope,
+      );
+      if (!resolvedScope.ok) {
+        emitBlocked(pi, {
+          feature: "pathAccess",
+          toolName,
+          input: event.input,
+          reason: resolvedScope.reason,
         });
-        continue;
+        return { block: true, reason: resolvedScope.reason };
       }
 
-      // result === "deny"
-      const reason = "User denied access outside working directory";
-      emitBlocked(pi, {
-        feature: "pathAccess",
-        toolName,
-        input: event.input,
-        reason,
-        userDenied: true,
-      });
-      return { block: true, reason };
+      const pendingGrant = pendingGrantForScope(
+        resolvedScope.scope,
+        absPath,
+        parentDir,
+        isDirectoryTool,
+        ctx,
+      );
+      if (pendingGrant) pendingGrants.push(pendingGrant);
     }
 
     // Persist grants only after ALL targets passed

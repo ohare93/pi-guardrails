@@ -122,7 +122,58 @@ Allowed paths use trailing-slash convention:
 Limitations:
 - Bash path extraction is best-effort (AST-based heuristics). Tokens like `application/json` may trigger false-positive prompts.
 - Symlinks are not resolved. Lexical path comparison only.
-- In non-interactive mode (--print), `ask` mode degrades to `block`.
+- In non-interactive mode (--print), `ask` mode degrades to `block` unless an enabled remote approval source is configured for the path-access route.
+
+---
+
+## Approval Broker
+
+The approval broker is enabled by default, but the only enabled source is the local Pi UI. Agent Tick is included as a disabled source preset until explicitly configured.
+
+```jsonc
+{
+  "approvalBroker": {
+    "enabled": true,
+    "defaultStrategy": {
+      "preset": "first-terminal",
+      "approvalsRequired": 1,
+      "denyPolicy": "first-deny-veto",
+      "cancelLosers": true,
+      "brokerTimeoutMs": "none",
+      "operatorAbort": true
+    },
+    "sources": {
+      "local": {
+        "type": "local-ui",
+        "enabled": true,
+        "local": true
+      },
+      "agent-tick": {
+        "type": "agent-tick-cli",
+        "enabled": false,
+        "local": false,
+        "bin": "agent-tick",
+        "timeout": "none",
+        "expiresIn": "none",
+        "requireAbandonForNoExpiry": true
+      }
+    },
+    "routes": {
+      "permissionGate": {
+        "sources": ["local"],
+        "strategy": { "preset": "first-terminal", "cancelLosers": true }
+      },
+      "pathAccess": {
+        "sources": ["local"],
+        "strategy": { "preset": "first-terminal", "cancelLosers": true },
+        "remoteGrantScopes": ["once"]
+      }
+    }
+  }
+}
+```
+
+Remote path-access approvals default to `once` and remote scoped grants are rejected unless the route explicitly lists the returned scope in `remoteGrantScopes`.
 
 ---
 

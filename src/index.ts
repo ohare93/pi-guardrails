@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { reconcileAgentTickPendingRequests } from "./approval";
 import { isOnboardingPending } from "./commands/onboarding";
 import { registerGuardrailsOnboardingCommand } from "./commands/onboarding-command";
 import { registerGuardrailsSettings } from "./commands/settings-command";
@@ -75,6 +76,20 @@ export default async function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", (_event, ctx) => {
+    const config = configLoader.getConfig();
+    const agentTickSource = config.approvalBroker.sources["agent-tick"];
+    if (
+      config.approvalBroker.enabled &&
+      agentTickSource?.enabled &&
+      agentTickSource.type === "agent-tick-cli"
+    ) {
+      void reconcileAgentTickPendingRequests(
+        agentTickSource,
+        ctx.cwd,
+        (message) => ctx.ui.notify(message, "warning"),
+      );
+    }
+
     for (const warning of pendingWarnings.splice(0)) {
       ctx.ui.notify(warning, "warning");
     }
