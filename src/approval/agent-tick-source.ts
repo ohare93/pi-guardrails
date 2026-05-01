@@ -106,6 +106,7 @@ type AgentTickEvent = {
   decision?: string;
   respondedAt?: string;
   response?: { choiceId?: string; message?: string };
+  error?: string;
   request?: { metadata?: Record<string, unknown> };
   metadata?: Record<string, unknown>;
 };
@@ -122,41 +123,41 @@ function correlationTokenHash(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
+function formatDuration(value: number | "none"): string {
+  if (value === "none") return "0";
+  return `${value}ms`;
+}
+
 function buildRequestArgs(
   request: ApprovalRequest,
   config: AgentTickSourceConfig,
 ) {
+  const correlationBlock = [
+    "",
+    "---",
+    "Pi approval metadata:",
+    `brokerRequestId: ${request.brokerRequestId}`,
+    `correlationToken: ${request.correlationToken}`,
+    request.sessionId ? `sessionId: ${request.sessionId}` : undefined,
+    request.toolCallId ? `toolCallId: ${request.toolCallId}` : undefined,
+    `actionFingerprint: ${request.metadata.actionFingerprint}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
   const args = [
     "request",
     "--json-events",
-    "--client-request-id",
-    request.brokerRequestId,
-    "--correlation-token",
-    request.correlationToken,
     "--title",
     request.title,
     "--body",
-    request.body,
-    "--metadata",
-    JSON.stringify({
-      ...request.metadata,
-      piBrokerRequestId: request.brokerRequestId,
-      correlationToken: request.correlationToken,
-      sessionId: request.sessionId,
-      toolCallId: request.toolCallId,
-      actionFingerprint: request.metadata.actionFingerprint,
-      toolName: request.action.toolName,
-      actionKind: request.action.kind,
-    }),
+    `${request.body}${correlationBlock}`,
+    "--timeout",
+    formatDuration(config.timeout ?? "none"),
+    "--expires-in",
+    formatDuration(config.expiresIn ?? "none"),
   ];
 
-  if (request.risk) args.push("--risk", request.risk);
-  if (config.timeout === "none") args.push("--no-timeout");
-  else if (typeof config.timeout === "number")
-    args.push("--timeout", String(config.timeout));
-  if (config.expiresIn === "none") args.push("--no-expiry");
-  else if (typeof config.expiresIn === "number")
-    args.push("--expires-in", String(config.expiresIn));
+  if (request.action.command) args.push("--command", request.action.command);
   args.push(...(config.extraArgs ?? []));
   return args;
 }
@@ -166,10 +167,16 @@ function validateEvent(
   event: AgentTickEvent,
   sourceRequestId?: string,
 ): string | undefined {
-  if (event.clientRequestId !== request.brokerRequestId) {
+  if (
+    event.clientRequestId !== undefined &&
+    event.clientRequestId !== request.brokerRequestId
+  ) {
     return "Agent Tick event clientRequestId mismatch";
   }
-  if (event.correlationToken !== request.correlationToken) {
+  if (
+    event.correlationToken !== undefined &&
+    event.correlationToken !== request.correlationToken
+  ) {
     return "Agent Tick event correlationToken mismatch";
   }
   if (sourceRequestId && event.requestId !== sourceRequestId) {
@@ -207,6 +214,11 @@ function eventToDecision(
   sourceId: string,
   sourceRequestId: string,
 ): ApprovalDecision {
+  if (event.status && event.status !== "responded") {
+    throw new Error(
+      event.error ?? `Agent Tick request ended with status ${event.status}`,
+    );
+  }
   const decision = event.decision ?? event.response?.choiceId;
   if (decision !== "approve" && decision !== "deny") {
     throw new Error(`Unsupported Agent Tick decision: ${String(decision)}`);
@@ -263,13 +275,15 @@ function parseAbandonResponse(
   value: unknown,
 ): CancelResult {
   const response = value as {
+    id?: string;
+    requestId?: string;
     status?: string;
     abandoned?: boolean;
     response?: { choiceId?: string; message?: string };
     respondedAt?: string;
   };
 
-  if (response.abandoned === false && response.status === "responded") {
+  if (response.status === "responded") {
     const decision = response.response?.choiceId;
     if (decision === "approve" || decision === "deny") {
       return {
@@ -335,10 +349,6 @@ export async function reconcileAgentTickPendingRequests(
       await readJsonFromCommand(config.bin ?? "agent-tick", [
         "abandon",
         record.sourceRequestId,
-        "--client-request-id",
-        record.brokerRequestId,
-        "--reason",
-        "Guardrails restart reconciliation",
         "--json",
       ]);
       emitStatus(
@@ -469,7 +479,10 @@ export function createAgentTickApprovalSource(
                 return;
               }
 
-              if (event.type === "created") {
+              if (
+                event.type === "created" ||
+                event.type === "request.created"
+              ) {
                 if (!event.requestId) {
                   void fail(
                     new Error("Agent Tick created event missing requestId"),
@@ -491,7 +504,10 @@ export function createAgentTickApprovalSource(
                 continue;
               }
 
-              if (event.type === "resolved") {
+              if (
+                event.type === "resolved" ||
+                event.type === "request.terminal"
+              ) {
                 if (!event.requestId) {
                   void fail(
                     new Error("Agent Tick resolved event missing requestId"),
@@ -529,7 +545,7 @@ export function createAgentTickApprovalSource(
             );
           });
         }),
-        async cancel(reason: string) {
+        async cancel(_reason: string) {
           if (!sourceRequestId) {
             settled = true;
             child.kill("SIGTERM");
@@ -550,15 +566,7 @@ export function createAgentTickApprovalSource(
 
           const response = await readJsonFromCommand(
             config.bin ?? "agent-tick",
-            [
-              "abandon",
-              sourceRequestId,
-              "--client-request-id",
-              request.brokerRequestId,
-              "--reason",
-              reason,
-              "--json",
-            ],
+            ["abandon", sourceRequestId, "--json"],
           );
           settled = true;
           child.kill("SIGTERM");

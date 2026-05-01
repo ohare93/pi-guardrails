@@ -134,6 +134,19 @@ describe("createAgentTickApprovalSource", () => {
       message: "ok",
     });
     expect(await store.list()).toEqual([]);
+    const calls = (await readFile(fake.callsFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    const requestCall = calls.find((call) => call[0] === "request") ?? [];
+    expect(requestCall).toContain("--json-events");
+    expect(requestCall).toContain("--timeout");
+    expect(requestCall).toContain("0");
+    expect(requestCall).toContain("--expires-in");
+    expect(requestCall).not.toContain("--no-timeout");
+    expect(requestCall).not.toContain("--no-expiry");
+    expect(requestCall).not.toContain("--client-request-id");
+    expect(requestCall).not.toContain("--correlation-token");
   });
 
   test("rejects stale or mismatched Agent Tick events", async ({ tmpdir }) => {
@@ -168,6 +181,7 @@ describe("createAgentTickApprovalSource", () => {
       .split("\n")
       .map((line) => JSON.parse(line) as string[]);
     expect(calls.some((call) => call[0] === "abandon")).toBe(true);
+    expect(calls).toContainEqual(["abandon", "agt_123", "--json"]);
     expect(calls.flat()).not.toContain("approve");
     expect(calls.flat()).not.toContain("deny");
   });
@@ -247,15 +261,7 @@ describe("createAgentTickApprovalSource", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as string[]);
-    expect(calls).toContainEqual([
-      "abandon",
-      "agt_orphan",
-      "--client-request-id",
-      "piapr_orphan",
-      "--reason",
-      "Guardrails restart reconciliation",
-      "--json",
-    ]);
+    expect(calls).toContainEqual(["abandon", "agt_orphan", "--json"]);
   });
 
   test("keeps pending records when reconciliation cannot abandon the remote request", async ({
